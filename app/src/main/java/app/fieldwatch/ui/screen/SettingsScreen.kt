@@ -708,6 +708,19 @@ private fun CreditFooter() {
                 onClick = { openUrl(context, "https://x.com/OGridPete") },
             )
         }
+        Text(
+            "由 wangzi5151 翻译",
+            style = MaterialTheme.typography.labelSmall,
+            color = muted,
+        )
+        Text(
+            "github.com/wangzi5151/Fieldwatch-zh",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.clickable {
+                openUrl(context, "https://github.com/wangzi5151/Fieldwatch-zh")
+            },
+        )
     }
 }
 
