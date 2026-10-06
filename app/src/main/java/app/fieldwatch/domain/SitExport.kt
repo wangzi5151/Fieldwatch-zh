@@ -1,0 +1,204 @@
+package app.fieldwatch.domain
+
+import org.json.JSONObject
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
+
+/** Share/Save of the selected sit (or last 15 minutes). Not the rotating log. */
+object SitExport {
+    const val CSV_HEADER =
+        "kind,mac,name,custom_name,observer_notes,rssi,rssi_min,rssi_max,channel,frequency_mhz," +
+            "randomized,hidden,first_seen,last_seen,hits,lat,lon,extra_attention," +
+            "signatures,extra_attention_families,mine"
+
+    fun csv(
+        devices: List<Sighting>,
+        radios: LogExportRadios,
+        customNames: Map<String, String>,
+        observerNotes: Map<String, String>,
+        extraKeys: Set<String>,
+        fleets: List<Fleet> = emptyList(),
+        mineKeys: Set<String> = emptySet(),
+    ): String = buildString {
+        append(CSV_HEADER).append('\n')
+        rows(devices, radios).forEach { d ->
+            val pin = hearPoint(d)
+            append(
+                listOf(
+                    csv(d.kind.name),
+                    csv(d.mac),
+                    csv(d.name),
+                    csv(customNames[d.key].orEmpty()),
+                    csv(observerNotes[d.key].orEmpty()),
+                    d.rssi.toString(),
+                    d.rssiMin.toString(),
+                    d.rssiMax.toString(),
+                    d.channel.toString(),
+                    d.frequencyMhz.toString(),
+                    d.randomized.toString(),
+                    d.hiddenSsid.toString(),
+                    iso(d.firstSeen),
+                    iso(d.lastSeen),
+                    d.hitCount.toString(),
+                    pin?.lat?.let { coord(it) }.orEmpty(),
+                    pin?.lon?.let { coord(it) }.orEmpty(),
+                    (d.key in extraKeys).toString(),
+                    csv(joinedNames(d, fleets)),
+                    csv(joinedAttention(d, fleets)),
+                    (d.key in mineKeys).toString(),
+                ).joinToString(","),
+            ).append('\n')
+        }
+    }
+
+    fun jsonl(
+        devices: List<Sighting>,
+        radios: LogExportRadios,
+        customNames: Map<String, String>,
+        observerNotes: Map<String, String>,
+        extraKeys: Set<String>,
+        fleets: List<Fleet> = emptyList(),
+        mineKeys: Set<String> = emptySet(),
+    ): String = buildString {
+        rows(devices, radios).forEach { d ->
+            val pin = hearPoint(d)
+            val obj = JSONObject()
+            obj.put("kind", d.kind.name)
+            obj.put("mac", d.mac)
+            obj.put("name", d.name)
+            obj.put("custom_name", customNames[d.key].orEmpty())
+            obj.put("observer_notes", observerNotes[d.key].orEmpty())
+            obj.put("rssi", d.rssi)
+            obj.put("rssi_min", d.rssiMin)
+            obj.put("rssi_max", d.rssiMax)
+            obj.put("channel", d.channel)
+            obj.put("frequency_mhz", d.frequencyMhz)
+            obj.put("randomized", d.randomized)
+            obj.put("hidden", d.hiddenSsid)
+            obj.put("first_seen", iso(d.firstSeen))
+            obj.put("last_seen", iso(d.lastSeen))
+            obj.put("hits", d.hitCount)
+            if (pin != null) {
+                obj.put("lat", pin.lat)
+                obj.put("lon", pin.lon)
+            } else {
+                obj.put("lat", JSONObject.NULL)
+                obj.put("lon", JSONObject.NULL)
+            }
+            obj.put("extra_attention", d.key in extraKeys)
+            obj.put("signatures", joinedNames(d, fleets))
+            obj.put("extra_attention_families", joinedAttention(d, fleets))
+            obj.put("mine", d.key in mineKeys)
+            append(obj.toString()).append('\n')
+        }
+    }
+
+    fun mapRadios(
+        devices: List<Sighting>,
+        radios: LogExportRadios,
+    ): List<LogRadio> = rows(devices, radios).mapNotNull { d ->
+        val pin = hearPoint(d) ?: return@mapNotNull null
+        LogRadio(
+            kind = d.kind,
+            mac = d.mac,
+            name = d.name,
+            vendor = d.vendor,
+            manufacturerId = d.manufacturerId,
+            manufacturerDataHex = d.manufacturerDataHex,
+            serviceUuids = d.serviceUuids,
+            vendorIeOuis = emptyList(),
+            randomized = d.randomized,
+            hiddenSsid = d.hiddenSsid,
+            rssi = d.rssi,
+            firstSeen = d.firstSeen,
+            lastSeen = d.lastSeen,
+            hits = d.hitCount,
+            channel = d.channel,
+            frequencyMhz = d.frequencyMhz,
+            latitude = pin.lat,
+            longitude = pin.lon,
+        )
+    }
+
+    fun rows(devices: List<Sighting>, radios: LogExportRadios): List<Sighting> =
+        devices.filter { radios.matches(it.kind) }
+            .sortedWith(compareByDescending<Sighting> { it.rssi }.thenBy { it.mac })
+
+    fun hearPoint(d: Sighting): GpsSample? {
+        val loudest = d.gpsTrail.maxByOrNull { it.rssi }
+        if (loudest != null) return loudest
+        val lat = d.latitude
+        val lon = d.longitude
+        if (lat != null && lon != null) return GpsSample(d.lastSeen, lat, lon, d.rssi)
+        return null
+    }
+
+    fun suggestedName(kind: LogExportKind, sitName: String, stamp: String): String {
+        val slug = sitName.lowercase(Locale.US)
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+            .take(24)
+            .ifBlank { "sit" }
+        val prefix = if (kind == LogExportKind.WIGLE) "fieldwatch-sit-wigle" else "fieldwatch-sit"
+        val ext = when (kind) {
+            LogExportKind.LOG_CSV, LogExportKind.WIGLE -> "csv"
+            LogExportKind.LOG_JSONL -> "jsonl"
+            LogExportKind.GPX -> "gpx"
+            LogExportKind.KML -> "kml"
+        }
+        return "$prefix-$slug-$stamp.$ext"
+    }
+
+    fun mime(kind: LogExportKind): String = when (kind) {
+        LogExportKind.LOG_CSV, LogExportKind.WIGLE -> "text/csv"
+        LogExportKind.LOG_JSONL -> "application/x-ndjson"
+        LogExportKind.GPX, LogExportKind.KML -> GeoExport.formatOf(kind)!!.mime
+    }
+
+    fun subject(kind: LogExportKind, sitName: String): String = when (kind) {
+        LogExportKind.LOG_CSV -> "Fieldwatch 监测 $sitName（CSV）"
+        LogExportKind.LOG_JSONL -> "Fieldwatch 监测 $sitName（JSON 行）"
+        LogExportKind.GPX -> "Fieldwatch 监测 $sitName（GPX）"
+        LogExportKind.KML -> "Fieldwatch 监测 $sitName（KML）"
+        LogExportKind.WIGLE -> "Fieldwatch 监测 $sitName（WiGLE CSV）"
+    }
+
+    fun emptyHint(kind: LogExportKind, radios: LogExportRadios): String {
+        val which = when (radios) {
+            LogExportRadios.BOTH -> "radios"
+            LogExportRadios.WIFI -> "Wi-Fi 设备"
+            LogExportRadios.BLE -> "BLE 设备"
+        }
+        return if (kind == LogExportKind.LOG_CSV || kind == LogExportKind.LOG_JSONL) {
+            "此监测中没有$which。"
+        } else {
+            "此监测中没有带 GPS 标记的$which。设置 → 为检测添加 GPS 标记。"
+        }
+    }
+
+    private fun joinedNames(d: Sighting, fleets: List<Fleet>): String {
+        if (d.fleetIds.isEmpty() || fleets.isEmpty()) return ""
+        val byId = fleets.associateBy { it.id }
+        return d.fleetIds.mapNotNull { byId[it]?.name?.trim()?.takeIf { n -> n.isNotEmpty() } }
+            .sorted()
+            .joinToString("; ")
+    }
+
+    private fun joinedAttention(d: Sighting, fleets: List<Fleet>): String =
+        d.attentionNotes(fleets).map { it.first }.joinToString("; ")
+
+    private fun csv(s: String): String =
+        if (s.any { it == ',' || it == '"' || it == '\n' || it == '\r' }) {
+            "\"${s.replace("\"", "\"\"")}\""
+        } else s
+
+    private fun coord(v: Double): String = String.format(Locale.US, "%.6f", v)
+
+    private val ISO = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US).apply {
+        timeZone = TimeZone.getTimeZone("UTC")
+    }
+
+    private fun iso(ms: Long): String = ISO.format(Date(ms))
+}
